@@ -1,0 +1,17 @@
+.DS_Store
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.app/
+*.dmg
+*.zip
+local-profiles/
+local-diagnostics/
+*.log
+
+dist/
+.swiftpm/
+
+# Local research downloads and diagnostic experiments
+work/

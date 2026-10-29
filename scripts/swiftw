@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+project_dir="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$project_dir"
+mkdir -p .build/module-cache .build/cache .build/config .build/security
+export CLANG_MODULE_CACHE_PATH="$project_dir/.build/module-cache"
+export SWIFT_MODULE_CACHE_PATH="$project_dir/.build/module-cache"
+command_name="${1:-build}"
+if [[ $# -gt 0 ]]; then shift; fi
+if [[ "${DESKRECALL_DISABLE_PACKAGE_SANDBOX:-0}" == "1" ]]; then
+    set -- --disable-sandbox "$@"
+fi
+exec swift "$command_name" --cache-path .build/cache --config-path .build/config --security-path .build/security --manifest-cache local "$@"
