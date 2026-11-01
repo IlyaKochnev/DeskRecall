@@ -1,9 +1,15 @@
 import Foundation
 
+public enum WindowMatchEvidence: String, Codable, Sendable {
+    case systemIdentity, runtimeToken, document, identifier, title, applicationSingleton, dominantWindow
+    case auxiliaryFingerprint, auxiliaryAttachment
+}
+
 public struct WindowMatch: Sendable, Equatable {
     public var savedIndex: Int
     public var currentIndex: Int
-    public init(savedIndex: Int, currentIndex: Int) { self.savedIndex = savedIndex; self.currentIndex = currentIndex }
+    public var evidence: WindowMatchEvidence
+    public init(savedIndex: Int, currentIndex: Int, evidence: WindowMatchEvidence = .systemIdentity) { self.savedIndex = savedIndex; self.currentIndex = currentIndex; self.evidence = evidence }
 }
 
 public enum WindowMatcher {
@@ -19,7 +25,7 @@ public enum WindowMatcher {
                     let b = current[c]
                     guard a.appID == b.appID else { return false }
                     if tier == 0 { return a.systemIdentity != nil && a.systemIdentity == b.systemIdentity }
-                    guard a.role == b.role, a.subrole == b.subrole else { return false }
+                    guard a.role == b.role, a.subrole == b.subrole || a.subrole.isEmpty || b.subrole.isEmpty else { return false }
                     switch tier {
                     case 1: return a.runtimeToken == b.runtimeToken
                     case 2: return equalNonempty(a.documentHash, b.documentHash)
@@ -32,7 +38,7 @@ public enum WindowMatcher {
             for s in remainingSaved.sorted() {
                 guard let candidates = proposals[s], candidates.count == 1, let c = candidates.first,
                       proposals.values.filter({ $0.contains(c) }).count == 1 else { continue }
-                matches.append(WindowMatch(savedIndex: s, currentIndex: c))
+                matches.append(WindowMatch(savedIndex: s, currentIndex: c, evidence: [.systemIdentity,.runtimeToken,.document,.identifier,.title][tier]))
                 remainingSaved.remove(s); remainingCurrent.remove(c)
             }
         }

@@ -30,9 +30,11 @@ public struct SystemWindowRecord: Sendable {
     public var appID: String
     public var frame: Rect
     public var onScreen: Bool
+    public var layer: Int
+    public var opacity: Double
     public var spaces: [SpaceReference]
-    public init(identity: SystemWindowIdentity, appID: String, frame: Rect, onScreen: Bool, spaces: [SpaceReference]) {
-        self.identity = identity; self.appID = appID; self.frame = frame; self.onScreen = onScreen; self.spaces = spaces
+    public init(identity: SystemWindowIdentity, appID: String, frame: Rect, onScreen: Bool, spaces: [SpaceReference], layer: Int = 0, opacity: Double = 1) {
+        self.identity = identity; self.appID = appID; self.frame = frame; self.onScreen = onScreen; self.spaces = spaces; self.layer = layer; self.opacity = opacity
     }
 }
 public enum WindowCaptureSource: String, Codable, Sendable { case system, accessibility, combined }
@@ -58,6 +60,7 @@ public enum WindowSnapshotAssembler {
             if let index { consumed.insert(index) }
             snapshot.runtimeToken = record.identity.runtimeToken
             snapshot.systemIdentity = record.identity; snapshot.spaces = record.spaces
+            snapshot.serverLayer = record.layer; snapshot.opacity = record.opacity
             snapshot.captureSource = index == nil ? .system : .combined
             snapshot.frame = record.frame; snapshot.displayID = display.id
             var state = snapshot.state ?? WindowState(canMove: false, canResize: false, onScreen: record.onScreen)

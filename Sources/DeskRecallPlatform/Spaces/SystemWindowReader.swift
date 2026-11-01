@@ -32,7 +32,8 @@ public enum SystemWindowReader {
             if mapper.available && spaces.isEmpty && !onScreen { continue }
             windows.append(SystemWindowRecord(identity: SystemWindowIdentity(windowID: id, pid: pid,
                 launchTime: app.launchTime, bootSession: boot), appID: app.bundleID, frame: frame,
-                onScreen: onScreen, spaces: spaces))
+                onScreen: onScreen, spaces: spaces, layer: layer,
+                opacity: (item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1))
         }
         return SystemInventory(windows: windows, spaces: mapper.managed, spaceReadAvailable: mapper.available)
     }

@@ -118,6 +118,8 @@ public struct WindowSnapshot: Codable, Equatable, Sendable {
     public var systemIdentity: SystemWindowIdentity?
     public var spaces: [SpaceReference]?
     public var captureSource: WindowCaptureSource?
+    public var serverLayer: Int?
+    public var opacity: Double?
     public init(runtimeToken: UUID = UUID(), appID: String, role: String = "AXWindow",
                 subrole: String = "AXStandardWindow", identifierHash: String? = nil,
                 documentHash: String? = nil, titleHash: String? = nil, displayID: String, frame: Rect, state: WindowState? = nil) {

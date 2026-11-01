@@ -15,7 +15,8 @@ import DeskRecallCore
         let saved = [w("terminal",1400,900),w("chrome",3000,1600),w("chrome",400,80),w("editor",900,700),w("editor",1000,800)]
         let live = [w("terminal",1300,900),w("chrome",1450,900),w("chrome",400,80),w("editor",1100,700),w("editor",1200,800)]
         let result = LegacyWindowMatcher.match(saved:saved,current:live)
-        expectEqual(result.map(\.savedIndex),[0,1]); expectEqual(result.map(\.currentIndex),[0,1])
+        expectEqual(result.map(\.savedIndex),[0,1,2]); expectEqual(result.map(\.currentIndex),[0,1,2])
+        expectEqual(result.last?.evidence,.auxiliaryFingerprint)
         expectEqual(WindowMatcher.match(saved:saved,current:live).count,0)
         expectTrue(LegacyWindowMatcher.match(saved:[w("app",1000,800)],current:[w("app",1000,800),w("app",1000,800)]).isEmpty)
     }

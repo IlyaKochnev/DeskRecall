@@ -12,7 +12,13 @@ public enum DesktopRestoreError: Error, LocalizedError {
         }
     }
 }
+public struct ResolvedWindowMatch: Sendable {
+    public var savedIndex: Int
+    public var current: WindowSnapshot
+    public var evidence: WindowMatchEvidence
+}
 public struct DesktopRestoreReport: Sendable {
+    public var resolved: [ResolvedWindowMatch] = []
     public var requested = 0
     public var verified = 0
     public var constrained = 0
@@ -113,7 +119,7 @@ public actor DesktopRestorer {
         throw DesktopRestoreError.spaceNotVerified
     }
     public func restoreWindow(saved: WindowSnapshot, current: WindowSnapshot, profile: Profile,
-                              topology: Topology) async throws -> ApplyResult {
+                              topology: Topology, evidence: WindowMatchEvidence = .systemIdentity) async throws -> ApplyResult {
         try await validate(topology)
         guard let oldDisplay = profile.topology.displays.first(where: { $0.id == saved.displayID }),
               let newDisplay = topology.displays.first(where: { $0.id == saved.displayID }) else { throw SpaceResolutionError.missingDisplay }
@@ -133,7 +139,28 @@ public actor DesktopRestorer {
         if let actualBefore, actualBefore.frame.isClose(to: target) {
             result = .restored(actual: actualBefore.frame)
         } else {
-            result = try await applyGeometry(window: current, target: target, returnSpaces: desired, topology: topology)
+            let auxiliary = evidence == .auxiliaryFingerprint || evidence == .auxiliaryAttachment
+            if auxiliary && evidence == .auxiliaryAttachment, let actualBefore { return .constrained(actual:actualBefore.frame) }
+            let noExposedControls = current.state?.canMove != true && current.state?.canResize != true
+            if auxiliary && (current.opacity == 0 || ((current.serverLayer ?? 0) > 0 && noExposedControls)), let actualBefore {
+                // Transparent or nonstandard app-owned surfaces must not be activated to hunt for controls.
+                do { return try await windows.apply(token:current.runtimeToken,target:target,topology:topology) }
+                catch is CancellationError { throw CancellationError() }
+                catch WindowServiceError.permission { throw WindowServiceError.permission }
+                catch { return .constrained(actual:actualBefore.frame) }
+            }
+            do { result = try await applyGeometry(window: current, target: target, returnSpaces: desired, topology: topology) }
+            catch let error as WindowServiceError {
+                guard auxiliary else { throw error }
+                switch error {
+                case .noAccessibilityElement, .readOnly:
+                    try await validate(topology)
+                    if let actual=try await inventory().windows.first(where: { $0.identity == current.systemIdentity }),
+                       Set(actual.spaces.map(\.systemID)) == Set(desired.map(\.systemID)) { return .constrained(actual:actual.frame) }
+                    throw error
+                default: throw error
+                }
+            }
         }
         try await validate(topology)
         if let identity = current.systemIdentity {
@@ -147,20 +174,27 @@ public actor DesktopRestorer {
     public func restore(profile: Profile, topology: Topology) async throws -> DesktopRestoreReport {
         try await prepareSpaces(profile: profile, topology: topology)
         let apps = await RunningApp.capture()
-        let scan = try await windows.scan(apps: apps, topology: topology)
+        let scan = try await windows.scanForPersistence(apps: apps, topology: topology)
         let matches = LegacyWindowMatcher.match(saved: profile.windows, current: scan.windows)
         return try await converge(profile:profile,current:scan.windows,matches:matches,topology:topology)
     }
     /// Final verification after all apps have reacted, rather than summing transient per-window successes.
     public func converge(profile: Profile, current: [WindowSnapshot], matches: [WindowMatch], topology: Topology) async throws -> DesktopRestoreReport {
         var failures: [Int:String] = [:]
+        var constrained = Set<Int>()
         for _ in 0..<3 {
             try await validate(topology)
             let state = try await inventory()
             for pair in matches {
                 let saved=profile.windows[pair.savedIndex]; let window=current[pair.currentIndex]
+                if constrained.contains(pair.savedIndex) { continue }
                 if try isVerified(saved:saved,current:window,profile:profile,topology:topology,inventory:state) { continue }
-                do { _ = try await restoreWindow(saved:saved,current:window,profile:profile,topology:topology) }
+                do {
+                    let result = try await restoreWindow(saved:saved,current:window,profile:profile,topology:topology,evidence:pair.evidence)
+                    if case .constrained = result, pair.evidence == .auxiliaryFingerprint || pair.evidence == .auxiliaryAttachment {
+                        constrained.insert(pair.savedIndex)
+                    }
+                }
                 catch is CancellationError { throw CancellationError() }
                 catch { failures[pair.savedIndex]=error.localizedDescription }
             }
@@ -170,12 +204,17 @@ public actor DesktopRestorer {
         }
         let final = try await inventory()
         var report=DesktopRestoreReport(); report.requested=profile.windows.count
+        report.resolved=matches.map { ResolvedWindowMatch(savedIndex:$0.savedIndex,current:current[$0.currentIndex],evidence:$0.evidence) }
         for pair in matches {
             let saved=profile.windows[pair.savedIndex]
             if try isVerified(saved:saved,current:current[pair.currentIndex],profile:profile,topology:topology,inventory:final) { report.verified += 1 }
-            else { report.details.append(saved.appID + ": " + (failures[pair.savedIndex] ?? "Итоговая геометрия или стол не совпали с профилем.")) }
+            else if constrained.contains(pair.savedIndex), let live=final.windows.first(where: { $0.identity == current[pair.currentIndex].systemIdentity }),
+                Set(live.spaces.map(\.systemID)) == Set(try SpaceResolver.resolve(saved:saved.spaces ?? [],current:final.spaces,topology:topology,sameBoot:false).map(\.systemID)) {
+                report.constrained += 1
+                report.details.append(saved.appID + ": вспомогательное окно распознано, рабочий стол подтверждён; геометрией управляет приложение.")
+            } else { report.details.append(saved.appID + ": " + (failures[pair.savedIndex] ?? "Итоговая геометрия или стол не совпали с профилем.")) }
         }
-        report.skipped=report.requested-report.verified
+        report.skipped=report.requested-report.verified-report.constrained
         return report
     }
     private func isVerified(saved: WindowSnapshot, current: WindowSnapshot, profile: Profile, topology: Topology, inventory: SystemInventory) throws -> Bool {

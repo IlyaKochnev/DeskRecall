@@ -406,7 +406,7 @@ import DeskRecallPlatform
                     let strong = Set(WindowMatcher.match(saved:profile.windows,current:scan.windows).map(\.savedIndex))
                     for match in matches where !strong.contains(match.savedIndex) {
                         let saved = profile.windows[match.savedIndex]
-                        self.journal(.windowMatched,topology:topology,id:operationID,operation:operation,outcome:.success,reason:.legacyIdentityFallback,appID:saved.appID,windowToken:saved.runtimeToken)
+                        self.journal(.windowMatched,topology:topology,id:operationID,operation:operation,outcome:.success,reason:(match.evidence == .auxiliaryFingerprint || match.evidence == .auxiliaryAttachment) ? .auxiliaryIdentityFallback : .legacyIdentityFallback,appID:saved.appID,windowToken:saved.runtimeToken)
                     }
                     var restored = 0; var constrained = 0
                     counts.matched = matches.count
@@ -420,6 +420,7 @@ import DeskRecallPlatform
                     }
                     if unmatched > 0 { details.append("Не найдены однозначно или недоступны через Accessibility: \(unmatched).") }
                     for pair in matches {
+                        if pair.evidence == .auxiliaryFingerprint || pair.evidence == .auxiliaryAttachment { continue }
                         try self.validate(generation, topology)
                         let saved = profile.windows[pair.savedIndex]
                         let current = scan.windows[pair.currentIndex]
@@ -455,7 +456,18 @@ import DeskRecallPlatform
                     restored=final.verified; constrained=final.constrained
                     counts.verified=final.verified; counts.constrained=final.constrained
                     details=scan.issues.map { "\($0.appID): \($0.reason)" } + final.details
-                    if unmatched > 0 { details.append("Не распознаны однозначно или уже закрыты: \(unmatched).") }
+                    let audit=WindowMatchAudit.inspect(saved:profile.windows,current:scan.windows,matches:matches)
+                    for app in Set(audit.filter { $0.availability != .matched }.map(\.appID)).sorted() {
+                        let records=audit.filter { $0.appID == app && $0.availability != .matched }
+                        let noWindows=records.filter { $0.availability == .noCurrentWindows }.count
+                        let ambiguous=records.filter { $0.availability == .ambiguous }.count
+                        let unknown=records.filter { $0.availability == .notIdentified }.count
+                        var reasons: [String]=[]
+                        if noWindows > 0 { reasons.append("нет текущих окон: \(noWindows)") }
+                        if ambiguous > 0 { reasons.append("неоднозначных совпадений: \(ambiguous)") }
+                        if unknown > 0 { reasons.append("прежняя поверхность не обнаружена или изменилась: \(unknown)") }
+                        details.append(app + ": " + reasons.joined(separator:"; "))
+                    }
                     let skipped = profile.windows.count - restored - constrained
                     self.lastReport = "Восстановлено: \(restored). Ограничено приложением: \(constrained). Пропущено: \(skipped).\n" +
                         details.joined(separator: "\n") + "\nРезультат проверен по геометрии и принадлежности рабочим столам."
@@ -513,7 +525,7 @@ import DeskRecallPlatform
             case .permission: return (.permissionDenied, nil)
             case .unavailable: return (.windowUnavailable, nil)
             case .changed: return (.windowChanged, nil)
-            case .readOnly: return (.windowReadOnly, nil)
+            case .readOnly, .noAccessibilityElement: return (.windowReadOnly, nil)
             case .ax(let code): return (.axFailure, Int(code))
             }
         }

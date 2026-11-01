@@ -6,6 +6,7 @@ public enum DesktopContentMatcher {
         var votes: [UInt64: [UInt64:Int]] = [:]
         var owners: [UInt64:Set<UInt64>] = [:]
         for pair in matches {
+            guard pair.evidence != .auxiliaryFingerprint && pair.evidence != .auxiliaryAttachment else { continue }
             guard let a = saved[pair.savedIndex].spaces, a.count == 1,
                   let b = current[pair.currentIndex].spaces, b.count == 1,
                   a[0].type == 0, b[0].type == 0 else { continue }

@@ -21,6 +21,9 @@ import Darwin
 
 let suite = CoreTests()
 let checks: [(String, @MainActor () async throws -> Void)] = [
+    ("Auxiliary classes and ambiguous saved shapes", { suite.testAuxiliaryMatchingUsesClassAndRejectsDuplicateSavedShapes() }),
+    ("Parent-attached popups and desktop anchor isolation", { suite.testAttachedPopupTracksParentAndDoesNotAnchorWholeDesktop() }),
+    ("Persistent metadata with missing subrole", { suite.testMissingSubroleAllowsPersistentDocumentEvidence() }),
     ("Screen-covering surfaces and Dock changes", { suite.testScreenCoveringSurfaceIgnoresDockInsets() }),
     ("Legacy reboot matching and ambiguous peers", { suite.testLegacyMatchingSurvivesRebootWithoutGuessingPeers() }),
     ("Desktop content and merged groups", { suite.testContentMatchingRejectsMergedAndTiedDesktops() }),

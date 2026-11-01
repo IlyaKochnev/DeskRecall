@@ -19,6 +19,7 @@ public enum DiagnosticOutcome: String, Codable, Sendable {
 }
 public enum DiagnosticReason: String, Codable, Sendable {
     case permissionDenied, sessionUnavailable, unsupportedTopology, busy, unstableDisplays
+    case auxiliaryIdentityFallback
     case legacyIdentityFallback
     case emptyScan, incompleteScan, replacementDeclined, contextChanged
     case unknownProfileSchema, corruptProfile, ioFailure, axFailure, windowUnavailable, windowChanged, windowReadOnly, spaceRestoreFailed, missingDesktop, nativeBackendUnavailable

@@ -9,12 +9,14 @@ public enum WindowServiceError: Error, LocalizedError {
     case unavailable
     case changed
     case readOnly
+    case noAccessibilityElement
     case ax(Int32)
     public var errorDescription: String? {
         switch self {
         case .permission: return "Нужен доступ «Универсальный доступ»."
         case .unavailable: return "Окно больше недоступно."
         case .changed: return "Состояние окна изменилось; оно пропущено."
+        case .noAccessibilityElement: return "Окно есть в WindowServer, но приложение не предоставляет для него объект управления Accessibility."
         case .readOnly: return "Окно сохранено, но его текущий режим не допускает изменение геометрии."
         case .ax(let code): return "Приложение отклонило изменение окна (\(code))."
         }
@@ -145,6 +147,9 @@ public actor WindowService {
             result.windows[index].titleHash = hash(attribute(element,kAXTitleAttribute))
             result.windows[index].subrole = attribute(element,kAXSubroleAttribute) ?? result.windows[index].subrole
             result.windows[index].captureSource = .combined
+            var state=result.windows[index].state ?? WindowState()
+            state.canMove=isSettable(element,kAXPositionAttribute); state.canResize=isSettable(element,kAXSizeAttribute)
+            result.windows[index].state=state
         }
         return result
     }
@@ -183,7 +188,7 @@ public actor WindowService {
             if record.frame.isClose(to: target) { return .restored(actual: record.frame) }
             element = try await resolveRemoteWindow(record.identity)
         }
-        guard let element else { throw WindowServiceError.readOnly }
+        guard let element else { throw WindowServiceError.noAccessibilityElement }
         let appElement = AXUIElementCreateApplication(window.app.pid)
         AXUIElementSetMessagingTimeout(appElement, 0.5)
         // Verify the same process is alive, and the AX window still belongs to it.
