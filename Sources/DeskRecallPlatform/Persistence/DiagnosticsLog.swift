@@ -7,6 +7,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case applicationStarted, applicationStopped, heartbeat, permissionChanged, screensChanged
     case sessionPaused, sessionResumed, automaticChanged, restoreScheduled, topologyStable
     case stabilizationTimeout, automaticDeferred, operationStarted, scanCompleted, profileMissing
+    case desktopsPrepared, windowMatched
     case profileSelected, profileSaved, saveRejected, windowResult, operationFinished, inventoryChecked
 }
 public enum DiagnosticTrigger: String, Codable, Sendable {
@@ -18,6 +19,7 @@ public enum DiagnosticOutcome: String, Codable, Sendable {
 }
 public enum DiagnosticReason: String, Codable, Sendable {
     case permissionDenied, sessionUnavailable, unsupportedTopology, busy, unstableDisplays
+    case legacyIdentityFallback
     case emptyScan, incompleteScan, replacementDeclined, contextChanged
     case unknownProfileSchema, corruptProfile, ioFailure, axFailure, windowUnavailable, windowChanged, windowReadOnly, spaceRestoreFailed, missingDesktop, nativeBackendUnavailable
 }
@@ -59,7 +61,7 @@ public struct DiagnosticEntry: Codable, Sendable {
     public var target: Rect?
     public var errorCode: Int?
     public init(event: DiagnosticEvent, timestamp: Date = Date(), sessionID: UUID = UUID(),
-                appVersion: String = "0.4.2", operationID: UUID? = nil,
+                appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development", operationID: UUID? = nil,
                 operation: DiagnosticOperation? = nil, trigger: DiagnosticTrigger? = nil,
                 topology: Topology? = nil, trusted: Bool? = nil, automatic: Bool? = nil,
                 busy: Bool? = nil, counts: DiagnosticCounts? = nil, durationMS: Int? = nil,

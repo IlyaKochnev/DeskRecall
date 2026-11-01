@@ -21,6 +21,9 @@ import Darwin
 
 let suite = CoreTests()
 let checks: [(String, @MainActor () async throws -> Void)] = [
+    ("Screen-covering surfaces and Dock changes", { suite.testScreenCoveringSurfaceIgnoresDockInsets() }),
+    ("Legacy reboot matching and ambiguous peers", { suite.testLegacyMatchingSurvivesRebootWithoutGuessingPeers() }),
+    ("Desktop content and merged groups", { suite.testContentMatchingRejectsMergedAndTiedDesktops() }),
     ("Topology identity and layout", { suite.testTopologyIgnoresEnumerationOrderAndGeometryForProfileKey() }),
     ("Ambiguous duplicate windows", { suite.testDuplicateTitlesNeverPickAnArbitraryWindow() }),
     ("Session identity and one-to-one assignment", { suite.testRuntimeIdentityResolvesDuplicatesAndNoWindowIsReused() }),

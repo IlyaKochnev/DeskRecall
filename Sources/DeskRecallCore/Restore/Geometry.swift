@@ -17,6 +17,11 @@ public enum Geometry {
             return da < db
         }
     }
+    public static func target(window: Rect, oldDisplay: DisplaySnapshot, newDisplay: DisplaySnapshot) -> Rect {
+        // Screen-covering utility surfaces intentionally include the menu bar and Dock areas.
+        if window.isClose(to:oldDisplay.frame,tolerance:1) { return newDisplay.frame }
+        return target(window:window,oldArea:oldDisplay.visibleFrame,newArea:newDisplay.visibleFrame)
+    }
     public static func target(window: Rect, oldArea: Rect, newArea: Rect) -> Rect {
         guard window.isValid, oldArea.isValid, newArea.isValid else { return newArea }
         let proposed: Rect

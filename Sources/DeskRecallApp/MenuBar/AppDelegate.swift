@@ -45,7 +45,8 @@ import DeskRecallPlatform
         statusItem.button?.toolTip = "DeskRecall — раскладки окон"
         menu.autoenablesItems = false
         menu.delegate = self
-        menu.addItem(NSMenuItem(title: "DeskRecall 0.4 — сохранение и восстановление", action: nil, keyEquivalent: ""))
+        let version = Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "development"
+        menu.addItem(NSMenuItem(title: "DeskRecall \(version) — сохранение и восстановление", action: nil, keyEquivalent: ""))
         menu.addItem(stateItem); menu.addItem(profileItem)
         menu.addItem(.separator())
         saveItem = add("Сохранить", #selector(save), "s")
@@ -88,14 +89,19 @@ import DeskRecallPlatform
         journalTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.journal(.heartbeat) }
         }
-        if CommandLine.arguments.contains("--verify-restoration") {
+        if CommandLine.arguments.contains("--verify-saved-restoration") {
+            Task { @MainActor in
+                self.lastReport = await SavedRestoreTest.run()
+                NSApp.terminate(nil)
+            }
+        } else if CommandLine.arguments.contains("--verify-restoration") {
             Task { @MainActor in
                 let result = await RestoreSelfTest.run()
                 self.lastReport = result
                 self.setStatus("Проверка завершена. См. отчёт.")
                 NSApp.terminate(nil)
             }
-        } else { scheduleAutomatic(force: true, trigger: .startup) }
+        } else if !CommandLine.arguments.contains("--diagnostic-idle") { scheduleAutomatic(force: true, trigger: .startup) }
         // A bounded smoke launch exercises AppKit lifecycle without moving or saving windows.
         if ProcessInfo.processInfo.arguments.contains("--smoke-test") {
             pendingTask?.cancel()
@@ -174,7 +180,7 @@ import DeskRecallPlatform
         scheduleAutomatic(force: true, trigger: .screens)
     }
     private func scheduleAutomatic(force: Bool, trigger: DiagnosticTrigger) {
-        guard !ProcessInfo.processInfo.arguments.contains("--smoke-test"), !CommandLine.arguments.contains("--verify-restoration") else { return }
+        guard !ProcessInfo.processInfo.arguments.contains("--smoke-test"), !CommandLine.arguments.contains("--verify-restoration"), !CommandLine.arguments.contains("--verify-saved-restoration"), !CommandLine.arguments.contains("--diagnostic-idle") else { return }
         invalidate()
         automaticTrigger = trigger
         guard automatic, sessionReady else {
@@ -255,7 +261,7 @@ import DeskRecallPlatform
                 if self.autoPending { self.tryAutomatic() }
             }
             do {
-                let scan = try await self.windows.scan(apps: RunningApp.capture(), topology: topology)
+                let scan = try await self.windows.scanForPersistence(apps: RunningApp.capture(), topology: topology)
                 try self.validate(generation, topology)
                 counts.scanned = scan.windows.count; counts.excluded = scan.excluded
                 counts.scanIssues = scan.issues.count; counts.coverage = scan.coverage
@@ -334,9 +340,10 @@ import DeskRecallPlatform
                 counts.requested = profile?.windows.count ?? 0
                 if let profile {
                     try await self.desktopRestorer.prepareSpaces(profile: profile, topology: topology)
+                    self.journal(.desktopsPrepared, topology:topology, id:operationID, operation:operation, outcome:.success)
                 }
                 try self.validate(generation, topology)
-                let scan = try await self.windows.scan(apps: RunningApp.capture(), topology: topology)
+                let scan = try await self.windows.scanForPersistence(apps: RunningApp.capture(), topology: topology)
                 try self.validate(generation, topology)
                 counts.scanned = scan.windows.count; counts.excluded = scan.excluded; counts.scanIssues = scan.issues.count; counts.coverage = scan.coverage
                 self.journal(.scanCompleted, topology: topology, id: operationID, operation: operation,
@@ -395,7 +402,12 @@ import DeskRecallPlatform
                     self.journal(.profileSaved, topology: topology, id: operationID, operation: operation, counts: counts, profile: savedProfile)
                     self.setStatus("Сохранено окон: \(scan.windows.count); ошибок чтения: \(scan.issues.count).")
                 } else if let profile {
-                    let matches = WindowMatcher.match(saved: profile.windows, current: scan.windows)
+                    let matches = LegacyWindowMatcher.match(saved: profile.windows, current: scan.windows)
+                    let strong = Set(WindowMatcher.match(saved:profile.windows,current:scan.windows).map(\.savedIndex))
+                    for match in matches where !strong.contains(match.savedIndex) {
+                        let saved = profile.windows[match.savedIndex]
+                        self.journal(.windowMatched,topology:topology,id:operationID,operation:operation,outcome:.success,reason:.legacyIdentityFallback,appID:saved.appID,windowToken:saved.runtimeToken)
+                    }
                     var restored = 0; var constrained = 0
                     counts.matched = matches.count
                     var details = scan.issues.map { "\($0.appID): \($0.reason)" }
@@ -413,7 +425,7 @@ import DeskRecallPlatform
                         let current = scan.windows[pair.currentIndex]
                         guard let oldDisplay = profile.topology.displays.first(where: { $0.id == saved.displayID }),
                               let newDisplay = topology.displays.first(where: { $0.id == saved.displayID }) else { continue }
-                        let target = Geometry.target(window: saved.frame, oldArea: oldDisplay.visibleFrame, newArea: newDisplay.visibleFrame)
+                        let target = Geometry.target(window: saved.frame, oldDisplay: oldDisplay, newDisplay: newDisplay)
                         do {
                             let result = try await self.desktopRestorer.restoreWindow(saved: saved, current: current, profile: profile, topology: topology)
                             try self.validate(generation, topology)
@@ -438,6 +450,12 @@ import DeskRecallPlatform
                         }
                     }
                     try self.validate(generation, topology)
+                    let final = try await self.desktopRestorer.converge(profile:profile,current:scan.windows,matches:matches,topology:topology)
+                    try self.validate(generation,topology)
+                    restored=final.verified; constrained=final.constrained
+                    counts.verified=final.verified; counts.constrained=final.constrained
+                    details=scan.issues.map { "\($0.appID): \($0.reason)" } + final.details
+                    if unmatched > 0 { details.append("Не распознаны однозначно или уже закрыты: \(unmatched).") }
                     let skipped = profile.windows.count - restored - constrained
                     self.lastReport = "Восстановлено: \(restored). Ограничено приложением: \(constrained). Пропущено: \(skipped).\n" +
                         details.joined(separator: "\n") + "\nРезультат проверен по геометрии и принадлежности рабочим столам."

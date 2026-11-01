@@ -7,7 +7,7 @@ import DeskRecallPlatform
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DeskRecall/Recovery", isDirectory: true)
         let reportURL = root.appendingPathComponent("latest-restore-test.json")
-        var output: [String:Any] = ["version":"0.4.2", "started":ISO8601DateFormatter().string(from:Date()),
+        var output: [String:Any] = ["version":Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "development", "started":ISO8601DateFormatter().string(from:Date()),
                                    "accessibilityTrusted":PermissionService.isTrusted, "passed":false]
         let worker = WindowService()
         let restore = DesktopRestorer(windows: worker)

@@ -42,38 +42,46 @@ public actor DesktopRestorer {
         let sameBoot = profile.windows.compactMap(\.systemIdentity).contains { saved in
             before.windows.contains { $0.identity.bootSession == saved.bootSession }
         }
-        for desired in (profile.spaces ?? []).sorted(by: { ($0.displayID,$0.index) < ($1.displayID,$1.index) }) {
-            try await validate(topology)
-            guard topology.displays.contains(where: { $0.id == desired.displayID }) || desired.displayID == "Main" else {
-                throw SpaceResolutionError.missingDisplay
-            }
-            var current = try await inventory()
-            if sameBoot, let existing = current.spaces.first(where: { $0.systemID == desired.systemID && $0.type == desired.type }) {
-                if existing.displayID == desired.displayID && existing.index == desired.index { continue }
-                guard NativeWindowBridge.moveSpace(existing.systemID, displayID: desired.displayID, index: desired.index) else {
-                    throw DesktopRestoreError.unsupported
-                }
-                try await awaitSpace(id: existing.systemID, desired: desired, topology: topology)
-                continue
-            }
-            if current.spaces.contains(where: { $0.displayID == desired.displayID && $0.index == desired.index && $0.type == desired.type }) { continue }
-            guard desired.type == 0 else { throw SpaceResolutionError.specialSpace }
-            let created = NativeWindowBridge.createSpace()
-            guard created != 0 else { throw SpaceResolutionError.missingSpace(desired.index) }
-            guard NativeWindowBridge.moveSpace(created, displayID: desired.displayID, index: desired.index) else {
-                _ = NativeWindowBridge.destroySpace(created)
-                throw DesktopRestoreError.unsupported
-            }
-            do { try await awaitSpace(id: created, desired: desired, topology: topology) }
-            catch {
-                if let state = try? await inventory(), !state.windows.contains(where: { $0.spaces.count == 1 && $0.spaces[0].systemID == created }) {
-                    _ = NativeWindowBridge.destroySpace(created)
-                }
-                throw error
-            }
-            current = try await inventory()
-            guard current.spaces.contains(where: { $0.systemID == created }) else { throw DesktopRestoreError.spaceNotVerified }
+        let scan = try await windows.scan(apps: await RunningApp.capture(), topology: topology)
+        let matches = LegacyWindowMatcher.match(saved: profile.windows, current: scan.windows)
+        let content = DesktopContentMatcher.match(saved: profile.windows, current: scan.windows, matches: matches)
+        let desiredSpaces = (profile.spaces ?? []).sorted { ($0.displayID,$0.index) < ($1.displayID,$1.index) }
+        var assigned: [UInt64:UInt64] = [:]
+        var used = Set<UInt64>()
+        // Reserve all identities before looking up ordinal fallbacks, so a desktop belonging to
+        // another saved slot cannot be stolen just because it currently occupies this ordinal.
+        for desired in desiredSpaces {
+            let id = sameBoot ? before.spaces.first(where: { $0.systemID == desired.systemID && $0.type == desired.type })?.systemID : content[desired.systemID]
+            if let id, !used.contains(id) { assigned[desired.systemID] = id; used.insert(id) }
         }
+        for desired in desiredSpaces where assigned[desired.systemID] == nil {
+            try await validate(topology)
+            guard topology.displays.contains(where: { $0.id == desired.displayID }) || desired.displayID == "Main" else { throw SpaceResolutionError.missingDisplay }
+            if let existing = before.spaces.first(where: {
+                $0.displayID == desired.displayID && $0.index == desired.index && $0.type == desired.type && !used.contains($0.systemID)
+            }) {
+                assigned[desired.systemID] = existing.systemID; used.insert(existing.systemID)
+            } else {
+                guard desired.type == 0 else { throw SpaceResolutionError.specialSpace }
+                let id = NativeWindowBridge.createSpace()
+                guard id != 0 else { throw SpaceResolutionError.missingSpace(desired.index) }
+                assigned[desired.systemID] = id; used.insert(id)
+            }
+        }
+        // Moves can shift the index of a previously positioned desktop. Verify the complete mapping.
+        for _ in 0..<3 {
+            for desired in desiredSpaces {
+                try await validate(topology)
+                guard let id = assigned[desired.systemID] else { throw DesktopRestoreError.spaceNotVerified }
+                let current = try await inventory()
+                if current.spaces.contains(where: { $0.systemID == id && $0.displayID == desired.displayID && $0.index == desired.index }) { continue }
+                guard NativeWindowBridge.moveSpace(id, displayID: desired.displayID, index: desired.index) else { throw DesktopRestoreError.unsupported }
+                try await awaitSpace(id:id,desired:desired,topology:topology)
+            }
+            let after = try await inventory()
+            if desiredSpaces.allSatisfy({ desired in after.spaces.contains { $0.systemID == assigned[desired.systemID] && $0.displayID == desired.displayID && $0.index == desired.index } }) { return }
+        }
+        throw DesktopRestoreError.spaceNotVerified
     }
     private func awaitSpace(id: UInt64, desired: SpaceReference, topology: Topology) async throws {
         for _ in 0..<25 {
@@ -109,7 +117,7 @@ public actor DesktopRestorer {
         try await validate(topology)
         guard let oldDisplay = profile.topology.displays.first(where: { $0.id == saved.displayID }),
               let newDisplay = topology.displays.first(where: { $0.id == saved.displayID }) else { throw SpaceResolutionError.missingDisplay }
-        let target = Geometry.target(window: saved.frame, oldArea: oldDisplay.visibleFrame, newArea: newDisplay.visibleFrame)
+        let target = Geometry.target(window: saved.frame, oldDisplay: oldDisplay, newDisplay: newDisplay)
         let prewarmApps = await RunningApp.capture().filter { $0.bundleID == current.appID }
         _ = try await windows.scan(apps: prewarmApps, topology: topology)
         let before = try await inventory()
@@ -140,24 +148,43 @@ public actor DesktopRestorer {
         try await prepareSpaces(profile: profile, topology: topology)
         let apps = await RunningApp.capture()
         let scan = try await windows.scan(apps: apps, topology: topology)
-        let matches = WindowMatcher.match(saved: profile.windows, current: scan.windows)
-        var report = DesktopRestoreReport(); report.requested = profile.windows.count
-        report.skipped = profile.windows.count - matches.count
-        for pair in matches {
+        let matches = LegacyWindowMatcher.match(saved: profile.windows, current: scan.windows)
+        return try await converge(profile:profile,current:scan.windows,matches:matches,topology:topology)
+    }
+    /// Final verification after all apps have reacted, rather than summing transient per-window successes.
+    public func converge(profile: Profile, current: [WindowSnapshot], matches: [WindowMatch], topology: Topology) async throws -> DesktopRestoreReport {
+        var failures: [Int:String] = [:]
+        for _ in 0..<3 {
             try await validate(topology)
-            let saved = profile.windows[pair.savedIndex]
-            do {
-                let result = try await restoreWindow(saved: saved, current: scan.windows[pair.currentIndex], profile: profile, topology: topology)
-                switch result {
-                case .restored: report.verified += 1
-                case .constrained: report.constrained += 1
-                }
-            } catch is CancellationError { throw CancellationError() }
-            catch {
-                report.skipped += 1; report.details.append("\(saved.appID): \(error.localizedDescription)")
+            let state = try await inventory()
+            for pair in matches {
+                let saved=profile.windows[pair.savedIndex]; let window=current[pair.currentIndex]
+                if try isVerified(saved:saved,current:window,profile:profile,topology:topology,inventory:state) { continue }
+                do { _ = try await restoreWindow(saved:saved,current:window,profile:profile,topology:topology) }
+                catch is CancellationError { throw CancellationError() }
+                catch { failures[pair.savedIndex]=error.localizedDescription }
             }
+            try await Task.sleep(for:.milliseconds(700))
+            let after = try await inventory()
+            if try matches.allSatisfy({ try isVerified(saved:profile.windows[$0.savedIndex],current:current[$0.currentIndex],profile:profile,topology:topology,inventory:after) }) { break }
         }
+        let final = try await inventory()
+        var report=DesktopRestoreReport(); report.requested=profile.windows.count
+        for pair in matches {
+            let saved=profile.windows[pair.savedIndex]
+            if try isVerified(saved:saved,current:current[pair.currentIndex],profile:profile,topology:topology,inventory:final) { report.verified += 1 }
+            else { report.details.append(saved.appID + ": " + (failures[pair.savedIndex] ?? "Итоговая геометрия или стол не совпали с профилем.")) }
+        }
+        report.skipped=report.requested-report.verified
         return report
+    }
+    private func isVerified(saved: WindowSnapshot, current: WindowSnapshot, profile: Profile, topology: Topology, inventory: SystemInventory) throws -> Bool {
+        guard let identity=current.systemIdentity, let live=inventory.windows.first(where: { $0.identity == identity }),
+              let old=profile.topology.displays.first(where: { $0.id == saved.displayID }),
+              let new=topology.displays.first(where: { $0.id == saved.displayID }) else { return false }
+        let target=Geometry.target(window:saved.frame,oldDisplay:old,newDisplay:new)
+        let desired=try SpaceResolver.resolve(saved:saved.spaces ?? [],current:inventory.spaces,topology:topology,sameBoot:false)
+        return live.frame.isClose(to:target) && (desired.isEmpty || Set(live.spaces.map(\.systemID)) == Set(desired.map(\.systemID)))
     }
     private func applyGeometry(window: WindowSnapshot, target: Rect, returnSpaces: [SpaceReference], topology: Topology) async throws -> ApplyResult {
         let apps = await RunningApp.capture().filter { $0.bundleID == window.appID }
@@ -186,6 +213,7 @@ public actor DesktopRestorer {
             try await Task.sleep(for:.milliseconds(350))
             do {
                 _ = try await windows.scan(apps:apps,topology:topology)
+                await windows.reacquireVisibleWindow(token:window.runtimeToken)
                 let result = try await windows.apply(token:window.runtimeToken,target:target,topology:topology)
                 try await move(identity:identity,to:finalSpaces,topology:topology)
                 _ = await MainActor.run { priorFront?.activate(options:[]) }

@@ -3,6 +3,7 @@ import Foundation
 public struct WindowMatch: Sendable, Equatable {
     public var savedIndex: Int
     public var currentIndex: Int
+    public init(savedIndex: Int, currentIndex: Int) { self.savedIndex = savedIndex; self.currentIndex = currentIndex }
 }
 
 public enum WindowMatcher {

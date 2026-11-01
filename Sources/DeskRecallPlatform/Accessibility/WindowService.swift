@@ -125,6 +125,50 @@ public actor WindowService {
         return result
     }
 
+    /// Enrich inactive-Space windows without moving them or saving raw titles/documents.
+    public func scanForPersistence(apps: [RunningApp], topology: Topology) async throws -> WindowScan {
+        var result = try scan(apps: apps, topology: topology)
+        guard PermissionService.isTrusted else { return result }
+        let began = ContinuousClock.now
+        var failedPIDs = Set<Int32>()
+        for index in result.windows.indices {
+            try Task.checkCancellation()
+            guard began.duration(to:.now) < .seconds(20), let identity = result.windows[index].systemIdentity,
+                  !failedPIDs.contains(identity.pid) else { continue }
+            let candidate = live[identity.runtimeToken]?.element ?? resolvedRemote[identity.runtimeToken]
+            let element: AXUIElement?
+            if let candidate { element = candidate }
+            else { element = try await resolveRemoteWindow(identity) }
+            guard let element, windowNumber.id(for:element) == identity.windowID else { failedPIDs.insert(identity.pid); continue }
+            result.windows[index].identifierHash = hash(attribute(element,kAXIdentifierAttribute))
+            result.windows[index].documentHash = hash(attribute(element,kAXDocumentAttribute))
+            result.windows[index].titleHash = hash(attribute(element,kAXTitleAttribute))
+            result.windows[index].subrole = attribute(element,kAXSubroleAttribute) ?? result.windows[index].subrole
+            result.windows[index].captureSource = .combined
+        }
+        return result
+    }
+
+    public func reacquireVisibleWindow(token: UUID) {
+        guard PermissionService.isTrusted, let liveWindow = live[token],
+              let rect = serverFrame(token:token,app:liveWindow.app) else { return }
+        let app = AXUIElementCreateApplication(liveWindow.app.pid)
+        var candidates: [AXUIElement] = []
+        if let focused: AXUIElement = attribute(app,kAXFocusedWindowAttribute) { candidates.append(focused) }
+        if let main: AXUIElement = attribute(app,kAXMainWindowAttribute) { candidates.append(main) }
+        var hit: AXUIElement?
+        if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(),Float(rect.x+rect.width/2),Float(rect.y+rect.height/2),&hit) == .success, let hit {
+            candidates.append(hit)
+            if let window: AXUIElement = attribute(hit,kAXWindowAttribute) { candidates.append(window) }
+        }
+        for element in candidates {
+            guard let id = windowNumber.id(for:element), inventoryIdentity(token:token,app:liveWindow.app,windowID:id) else { continue }
+            resolvedRemote[token]=element
+            live[token]=LiveWindow(token:token,app:liveWindow.app,element:element)
+            return
+        }
+    }
+
     public func apply(token: UUID, target: Rect, topology: Topology) async throws -> ApplyResult {
         try Task.checkCancellation()
         guard PermissionService.isTrusted else { throw WindowServiceError.permission }
@@ -149,10 +193,10 @@ public actor WindowService {
               live[token]?.token == token,
               let actualNumber = windowNumber.id(for: element),
               inventoryIdentity(token: token, app: window.app, windowID: actualNumber),
-              let before = frame(element) else { throw WindowServiceError.unavailable }
+              frame(element) != nil else { throw WindowServiceError.unavailable }
         let fullscreen: Bool? = attribute(element, "AXFullScreen")
         let minimized: Bool? = attribute(element, kAXMinimizedAttribute)
-        if before.isClose(to: target) { return .restored(actual: before) }
+        if let actual = serverFrame(token:token,app:window.app), actual.isClose(to:target) { return .restored(actual:actual) }
         guard fullscreen != true else { throw WindowServiceError.readOnly }
         let enhanced: Bool? = attribute(appElement, "AXEnhancedUserInterface")
         if enhanced == true { _ = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse) }
